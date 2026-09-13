@@ -1,5 +1,5 @@
 import Editor from "@monaco-editor/react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 function App() {
   const [code, setCode] = useState(`#include <stdio.h>
@@ -10,6 +10,64 @@ int main() {
 }`);
 
   const [output, setOutput] = useState("Terminal ready...");
+  const ws = useRef<WebSocket | null>(null);
+
+  useEffect(() => {
+    const socket = new WebSocket("ws://localhost:3000");
+
+    socket.onopen = () => {
+      setOutput("Connected to PrayogCode compiler.\\n");
+    };
+
+    socket.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+
+      if (message.type === "stdout") {
+        setOutput((previous) => previous + message.data);
+      }
+
+      if (message.type === "stderr") {
+        setOutput((previous) => previous + message.data);
+      }
+
+      if (message.type === "error") {
+        setOutput((previous) => previous + "\\nERROR: " + message.data);
+      }
+
+      if (message.type === "exit") {
+        setOutput(
+          (previous) =>
+            previous + `\\nProcess exited with code ${message.code}\\n`
+        );
+      }
+    };
+
+    socket.onerror = () => {
+      setOutput("Could not connect to compiler backend.");
+    };
+
+    ws.current = socket;
+
+    return () => {
+      socket.close();
+    };
+  }, []);
+
+  const runCode = () => {
+    if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
+      setOutput("Compiler backend is not connected.");
+      return;
+    }
+
+    setOutput("Compiling...\\n");
+
+    ws.current.send(
+      JSON.stringify({
+        type: "run",
+        code,
+      })
+    );
+  };
 
   return (
     <div className="app">
@@ -19,7 +77,7 @@ int main() {
           <span>C Programming Laboratory</span>
         </div>
 
-        <button className="run-button">
+        <button className="run-button" onClick={runCode}>
           ▶ Run
         </button>
       </header>
