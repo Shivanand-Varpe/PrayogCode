@@ -89,3 +89,29 @@ body {
   background: #0b0d12;
   overflow: hidden;
 }
+.terminal-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.terminal-actions button {
+  border: none;
+  border-radius: 5px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.clear-button {
+  background: #374151;
+  color: white;
+}
+
+.stop-button {
+  background: #dc2626;
+  color: white;
+}
+
+.terminal-actions button:hover {
+  opacity: 0.85;
+}

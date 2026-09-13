@@ -150,6 +150,24 @@ int main() {
       })
     );
   };
+  const stopCode = () => {
+    if (
+      ws.current &&
+      ws.current.readyState === WebSocket.OPEN
+    ) {
+      ws.current.send(
+        JSON.stringify({
+          type: "stop",
+        })
+      );
+    }
+  };
+
+  const clearTerminal = () => {
+    if (terminal.current) {
+      terminal.current.clear();
+    }
+  };
 
   return (
     <div className="app">
@@ -171,8 +189,23 @@ int main() {
       <main className="workspace">
         <section className="editor-panel">
           <div className="panel-title">
-            <span>main.c</span>
-            <span>C</span>
+            <span>Terminal</span>
+
+            <div className="terminal-actions">
+              <button
+                className="clear-button"
+                onClick={clearTerminal}
+              >
+                Clear
+              </button>
+
+              <button
+                className="stop-button"
+                onClick={stopCode}
+              >
+                Stop
+              </button>
+            </div>
           </div>
 
           <Editor

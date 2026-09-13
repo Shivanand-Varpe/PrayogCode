@@ -115,6 +115,20 @@ wss.on("connection", (ws) => {
                     runningProcess.write(data.data);
                 }
             }
+            if (data.type === "stop") {
+                if (runningProcess) {
+                    console.log("Stopping C program...");
+
+                    runningProcess.kill();
+                    runningProcess = null;
+
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({
+                            type: "stopped"
+                        }));
+                    }
+                }
+            }
 
         } catch (error) {
             console.log("Message error:", error.message);
