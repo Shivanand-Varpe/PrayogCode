@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>PrayogCode Terminal Test</title>
+</head>
+<body>
+
+<h2>PrayogCode C Terminal</h2>
+
+<textarea id="code" rows="15" cols="70">
+#include <stdio.h>
+
+int main() {
+    int a, b;
+
+    printf("Enter two numbers: ");
+    scanf("%d %d", &a, &b);
+
+    printf("Sum = %d\n", a + b);
+
+    return 0;
+}
+</textarea>
+
+<br><br>
+
+<button onclick="runCode()">RUN</button>
+
+<pre id="terminal"></pre>
+
+<input
+    id="input"
+    placeholder="Type terminal input here and press Enter"
+    style="width:400px;"
+>
+
+<script>
+const terminal = document.getElementById("terminal");
+const input = document.getElementById("input");
+
+const ws = new WebSocket("ws://localhost:3000");
+
+ws.onopen = () => {
+    terminal.textContent += "Connected to PrayogCode\n";
+};
+
+ws.onmessage = (event) => {
+    const message = JSON.parse(event.data);
+
+    if (message.type === "stdout") {
+        terminal.textContent += message.data;
+    }
+
+    if (message.type === "stderr") {
+        terminal.textContent += message.data;
+    }
+
+    if (message.type === "error") {
+        terminal.textContent += "\nERROR: " + message.data + "\n";
+    }
+
+    if (message.type === "exit") {
+        terminal.textContent +=
+            `\nProcess exited with code ${message.code}\n`;
+    }
+};
+
+function runCode() {
+    terminal.textContent = "";
+
+    ws.send(JSON.stringify({
+        type: "run",
+        code: document.getElementById("code").value
+    }));
+}
+
+input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+        ws.send(JSON.stringify({
+            type: "input",
+            data: input.value + "\n"
+        }));
+
+        terminal.textContent += input.value + "\n";
+        input.value = "";
+    }
+});
+</script>
+
+</body>
+</html>
