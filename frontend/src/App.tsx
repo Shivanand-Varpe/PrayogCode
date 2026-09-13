@@ -20,44 +20,88 @@ int main() {
 
   const [connected, setConnected] = useState(false);
 
+  const terminalRef = useRef<HTMLDivElement | null>(null);
   const ws = useRef<WebSocket | null>(null);
-  const terminalContainerRef = useRef<HTMLDivElement | null>(null);
-  const terminalRef = useRef<Terminal | null>(null);
-  const fitAddonRef = useRef<FitAddon | null>(null);
+  const terminal = useRef<Terminal | null>(null);
 
   useEffect(() => {
+    if (!terminalRef.current) return;
+
     const term = new Terminal({
       cursorBlink: true,
-      theme: {
-        background: "#0b0d12",
-        foreground: "#e5e7eb",
-        cursor: "#22c55e",
-      },
       fontSize: 14,
       fontFamily: "Consolas, monospace",
-      convertEol: true,
+      theme: {
+        background: "#0b0d12",
+      },
     });
 
     const fitAddon = new FitAddon();
+
     term.loadAddon(fitAddon);
+    term.open(terminalRef.current);
+    fitAddon.fit();
 
-    if (terminalContainerRef.current) {
-      term.open(terminalContainerRef.current);
-      try {
-        fitAddon.fit();
-      } catch {
-        // Container might not be measured yet
+    terminal.current = term;
+
+    const socket = new WebSocket("ws://localhost:3000");
+
+    ws.current = socket;
+
+    socket.onopen = () => {
+      console.log("WebSocket connected");
+
+      setConnected(true);
+
+      term.writeln("Connected to PrayogCode compiler.");
+      term.writeln("");
+    };
+
+    socket.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+
+      console.log("Backend message:", message);
+
+      if (message.type === "stdout") {
+        term.write(message.data);
       }
-    }
 
-    terminalRef.current = term;
-    fitAddonRef.current = fitAddon;
+      if (message.type === "stderr") {
+        term.write(message.data);
+      }
 
-    term.write("Connecting to PrayogCode compiler...\r\n");
+      if (message.type === "error") {
+        term.writeln("");
+        term.writeln("ERROR: " + message.data);
+      }
 
-    const onDataDisposable = term.onData((data) => {
-      if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-        ws.current.send(
+      if (message.type === "exit") {
+        term.writeln("");
+        term.writeln(
+          `Process exited with code ${message.code}`
+        );
+      }
+    };
+
+    socket.onerror = () => {
+      console.log("WebSocket error");
+
+      setConnected(false);
+
+      term.writeln("");
+      term.writeln("Could not connect to compiler backend.");
+    };
+
+    socket.onclose = () => {
+      console.log("WebSocket closed");
+      setConnected(false);
+    };
+
+    term.onData((data) => {
+      if (
+        socket.readyState === WebSocket.OPEN
+      ) {
+        socket.send(
           JSON.stringify({
             type: "input",
             data: data,
@@ -66,86 +110,38 @@ int main() {
       }
     });
 
-    const safeFit = () => {
-      try {
-        fitAddon.fit();
-      } catch {
-        // Ignore resize calculation errors when element is detached or hidden
-      }
+    const handleResize = () => {
+      fitAddon.fit();
     };
 
-    window.addEventListener("resize", safeFit);
-
-    const resizeObserver = new ResizeObserver(() => {
-      safeFit();
-    });
-
-    if (terminalContainerRef.current) {
-      resizeObserver.observe(terminalContainerRef.current);
-    }
-
-    requestAnimationFrame(safeFit);
-
-    const socket = new WebSocket("ws://localhost:3000");
-    ws.current = socket;
-
-    socket.onopen = () => {
-      setConnected(true);
-      term.write("Connected to PrayogCode compiler.\r\n");
-    };
-
-    socket.onmessage = (event) => {
-      try {
-        const message = JSON.parse(event.data);
-
-        switch (message.type) {
-          case "stdout":
-            term.write(message.data);
-            break;
-          case "stderr":
-            term.write(message.data);
-            break;
-          case "error":
-            term.write("\r\n" + (message.data || "Compilation failed") + "\r\n");
-            break;
-          case "exit":
-            term.write(`\r\nProcess exited with code ${message.code}\r\n`);
-            break;
-        }
-      } catch (err) {
-        console.error("Failed to parse WebSocket message:", err);
-      }
-    };
-
-    socket.onerror = () => {
-      setConnected(false);
-      term.write("\r\nCould not connect to compiler backend.\r\n");
-    };
-
-    socket.onclose = () => {
-      setConnected(false);
-      term.write("\r\nWebSocket disconnected.\r\n");
-    };
+    window.addEventListener(
+      "resize",
+      handleResize
+    );
 
     return () => {
-      window.removeEventListener("resize", safeFit);
-      resizeObserver.disconnect();
-      onDataDisposable.dispose();
+      window.removeEventListener(
+        "resize",
+        handleResize
+      );
+
       socket.close();
       term.dispose();
-      terminalRef.current = null;
-      fitAddonRef.current = null;
     };
   }, []);
 
   const runCode = () => {
-    if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
-      terminalRef.current?.write("\r\nCompiler is not connected.\r\n");
+    if (
+      !ws.current ||
+      ws.current.readyState !== WebSocket.OPEN
+    ) {
       return;
     }
 
-    terminalRef.current?.clear();
-    terminalRef.current?.write("Compiling...\r\n");
+    if (terminal.current) {
+      terminal.current.clear();
+      terminal.current.writeln("Compiling...");
+    }
 
     ws.current.send(
       JSON.stringify({
@@ -183,10 +179,14 @@ int main() {
             height="calc(100vh - 110px)"
             defaultLanguage="c"
             value={code}
-            onChange={(value) => setCode(value || "")}
+            onChange={(value) =>
+              setCode(value || "")
+            }
             theme="vs-dark"
             options={{
-              minimap: { enabled: false },
+              minimap: {
+                enabled: false,
+              },
               fontSize: 15,
               automaticLayout: true,
             }}
@@ -198,7 +198,10 @@ int main() {
             <span>Terminal</span>
           </div>
 
-          <div ref={terminalContainerRef} className="terminal-container" />
+          <div
+            ref={terminalRef}
+            className="terminal"
+          />
         </section>
       </main>
     </div>
