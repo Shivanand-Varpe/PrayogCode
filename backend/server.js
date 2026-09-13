@@ -46,13 +46,13 @@ wss.on("connection", (ws) => {
                     const result = await compileC(data.code);
 
                     console.log("Compilation successful");
-                    console.log("Starting:", result.executable);
+                    console.log("Starting WSL program:", result.executable);
 
-                    const command = process.env.ComSpec || "cmd.exe";
+                    const wslExecutable = result.executable;
 
                     runningProcess = pty.spawn(
-                        command,
-                        ["/c", result.executable],
+                        "wsl.exe",
+                        ["--", wslExecutable],
                         {
                             name: "xterm-color",
                             cols: 100,
@@ -62,10 +62,13 @@ wss.on("connection", (ws) => {
                         }
                     );
 
-                    console.log("C program started");
+                    console.log("C program started inside WSL");
 
                     runningProcess.onData((output) => {
-                        console.log("PROGRAM OUTPUT:", JSON.stringify(output));
+                        console.log(
+                            "PROGRAM OUTPUT:",
+                            JSON.stringify(output)
+                        );
 
                         if (ws.readyState === WebSocket.OPEN) {
                             ws.send(JSON.stringify({
@@ -104,7 +107,11 @@ wss.on("connection", (ws) => {
 
             if (data.type === "input") {
                 if (runningProcess) {
-                    console.log("Input sent:", JSON.stringify(data.data));
+                    console.log(
+                        "Input sent:",
+                        JSON.stringify(data.data)
+                    );
+
                     runningProcess.write(data.data);
                 }
             }
@@ -125,5 +132,7 @@ wss.on("connection", (ws) => {
 });
 
 server.listen(PORT, () => {
-    console.log(`PrayogCode server running at http://localhost:${PORT}`);
+    console.log(
+        `PrayogCode server running at http://localhost:${PORT}`
+    );
 });

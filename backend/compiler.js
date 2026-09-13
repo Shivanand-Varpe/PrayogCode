@@ -14,25 +14,25 @@ function compileC(code) {
         const tempDir = createTempFolder();
 
         const sourceFile = path.join(tempDir, "main.c");
-        const outputFile = path.join(tempDir, "main.exe");
 
         fs.writeFileSync(sourceFile, code);
 
-        const gcc = spawn(
-            "gcc",
-            ["main.c", "-o", "main.exe"],
-            {
-                cwd: tempDir
-            }
+        const wslPath = `/mnt/${sourceFile[0].toLowerCase()}${sourceFile
+            .slice(2)
+            .replace(/\\/g, "/")}`;
+
+        const compileProcess = spawn(
+            "wsl",
+            ["gcc", wslPath, "-o", `${wslPath}.out`]
         );
 
         let stderr = "";
 
-        gcc.stderr.on("data", (data) => {
+        compileProcess.stderr.on("data", (data) => {
             stderr += data.toString();
         });
 
-        gcc.on("close", (code) => {
+        compileProcess.on("close", (code) => {
             if (code !== 0) {
                 reject({
                     type: "compile_error",
@@ -43,11 +43,11 @@ function compileC(code) {
 
             resolve({
                 tempDir,
-                executable: outputFile
+                executable: `${wslPath}.out`
             });
         });
 
-        gcc.on("error", (error) => {
+        compileProcess.on("error", (error) => {
             reject({
                 type: "gcc_error",
                 message: error.message
