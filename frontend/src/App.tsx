@@ -62,6 +62,11 @@ int main() {
 
       console.log("Backend message:", message);
 
+      if (message.type === "timeout") {
+        term.writeln("");
+        term.writeln("⏱️ " + message.data);
+      }
+
       if (message.type === "stdout") {
         term.write(message.data);
       }

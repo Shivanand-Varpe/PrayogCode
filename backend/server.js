@@ -24,6 +24,7 @@ wss.on("connection", (ws) => {
     console.log("Terminal connected");
 
     let runningProcess = null;
+    let timedOut = false;
 
     ws.on("message", async (message) => {
         try {
@@ -49,6 +50,8 @@ wss.on("connection", (ws) => {
                     console.log("Starting WSL program:", result.executable);
 
                     const wslExecutable = result.executable;
+                    
+                    timedOut = false;
 
                     runningProcess = pty.spawn(
                         "wsl.exe",
@@ -77,18 +80,36 @@ wss.on("connection", (ws) => {
                             }));
                         }
                     });
+                    const timeout = setTimeout(() => {
+                        if (runningProcess) {
+                            console.log("Execution timeout");
 
+                            timedOut = true;
+
+                            runningProcess.kill();
+                        }
+                    }, 5000);
                     runningProcess.onExit(({ exitCode }) => {
+                        clearTimeout(timeout);
+
                         console.log("Process exited:", exitCode);
 
                         if (ws.readyState === WebSocket.OPEN) {
-                            ws.send(JSON.stringify({
-                                type: "exit",
-                                code: exitCode
-                            }));
+                            if (timedOut) {
+                                ws.send(JSON.stringify({
+                                    type: "timeout",
+                                    data: "Time Limit Exceeded (5 seconds)"
+                                }));
+                            } else {
+                                ws.send(JSON.stringify({
+                                    type: "exit",
+                                    code: exitCode
+                                }));
+                            }
                         }
 
                         runningProcess = null;
+                        timedOut = false;
                     });
 
                 } catch (error) {
