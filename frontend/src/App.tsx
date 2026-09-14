@@ -78,7 +78,8 @@ function App() {
     // Show initial Stitch empty state
     term.writeln("\x1b[90mRun your C program to see the output here.\x1b[0m");
 
-    const socket = new WebSocket("ws://localhost:3000");
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(`${protocol}//${window.location.host}`);
     ws.current = socket;
 
     socket.onopen = () => {
@@ -131,7 +132,7 @@ function App() {
       setConnected(false);
       setAppState("ERROR");
       setStatusMessage("Disconnected");
-      term.writeln("\x1b[31mCould not connect to compiler backend (ws://localhost:3000).\x1b[0m");
+      term.writeln("\x1b[31mCould not connect to compiler backend.\x1b[0m");
     };
 
     socket.onclose = () => {
