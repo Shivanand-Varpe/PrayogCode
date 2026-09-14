@@ -8,6 +8,7 @@ const { compileC } = require("./compiler");
 
 const app = express();
 const PORT = 3000;
+const MAX_SOURCE_SIZE = 100 * 1024; // 100 KB
 
 function cleanupTempFolder(tempDir) {
     if (!tempDir) return;
@@ -68,6 +69,14 @@ wss.on("connection", (ws) => {
                     ws.send(JSON.stringify({
                         type: "error",
                         data: "A program is already running."
+                    }));
+                    return;
+                }
+
+                if (Buffer.byteLength(data.code || "", "utf8") > MAX_SOURCE_SIZE) {
+                    ws.send(JSON.stringify({
+                        type: "error",
+                        data: "Source code is too large. Maximum allowed size: 100 KB."
                     }));
                     return;
                 }
