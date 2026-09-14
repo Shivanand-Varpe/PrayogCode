@@ -9,13 +9,37 @@ function createTempFolder() {
     );
 }
 
+function cleanupTempFolder(tempDir) {
+    if (!tempDir) return;
+
+    try {
+        fs.rmSync(tempDir, {
+            recursive: true,
+            force: true
+        });
+    } catch (error) {
+        console.log("Cleanup error:", error.message);
+    }
+}
+
 function compileC(code) {
     return new Promise((resolve, reject) => {
         const tempDir = createTempFolder();
 
         const sourceFile = path.join(tempDir, "main.c");
 
-        fs.writeFileSync(sourceFile, code);
+        try {
+            fs.writeFileSync(sourceFile, code);
+        } catch (error) {
+            cleanupTempFolder(tempDir);
+
+            reject({
+                type: "file_error",
+                message: "Could not create source file."
+            });
+
+            return;
+        }
 
         const wslPath = `/mnt/${sourceFile[0].toLowerCase()}${sourceFile
             .slice(2)
@@ -32,12 +56,15 @@ function compileC(code) {
             stderr += data.toString();
         });
 
-        compileProcess.on("close", (code) => {
-            if (code !== 0) {
+        compileProcess.on("close", (exitCode) => {
+            if (exitCode !== 0) {
+                cleanupTempFolder(tempDir);
+
                 reject({
                     type: "compile_error",
-                    message: stderr
+                    message: stderr.trim() || "Compilation failed."
                 });
+
                 return;
             }
 
@@ -48,9 +75,11 @@ function compileC(code) {
         });
 
         compileProcess.on("error", (error) => {
+            cleanupTempFolder(tempDir);
+
             reject({
                 type: "gcc_error",
-                message: error.message
+                message: "Compiler error: " + error.message
             });
         });
     });

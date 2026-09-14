@@ -106,7 +106,7 @@ wss.on("connection", (ws) => {
 
                             runningProcess.kill();
                         }
-                    }, 5000);
+                    }, 60000);
                     runningProcess.onExit(({ exitCode }) => {
                         clearTimeout(timeout);
 
@@ -116,7 +116,7 @@ wss.on("connection", (ws) => {
                             if (timedOut) {
                                 ws.send(JSON.stringify({
                                     type: "timeout",
-                                    data: "Time Limit Exceeded (5 seconds)"
+                                    data: "Time Limit Exceeded (60 seconds)"
                                 }));
                             } else {
                                 ws.send(JSON.stringify({
@@ -132,14 +132,12 @@ wss.on("connection", (ws) => {
                     });
 
                 } catch (error) {
-                    console.log("Execution error:", error);
-
-                    runningProcess = null;
+                    console.log("Compilation failed");
 
                     if (ws.readyState === WebSocket.OPEN) {
                         ws.send(JSON.stringify({
                             type: "error",
-                            data: error.message || "Program could not start"
+                            data: error.message || "Compilation failed."
                         }));
                     }
                 }
