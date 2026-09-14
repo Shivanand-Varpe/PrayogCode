@@ -42,6 +42,7 @@ wss.on("connection", (ws) => {
     console.log("Terminal connected");
 
     let runningSession = null;
+    let currentCompileSession = null;
     let isCompiling = false;
     let currentTempDir = null;
     let timedOut = false;
@@ -65,11 +66,20 @@ wss.on("connection", (ws) => {
     function resetTimeout() {
         if (executionTimeout) {
             clearTimeout(executionTimeout);
+            executionTimeout = null;
         }
         executionTimeout = setTimeout(() => {
             if (runningSession) {
-                console.log("Execution timeout (60 seconds)");
+                console.log("Execution timeout reached (60 seconds)");
                 timedOut = true;
+
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: "timeout",
+                        data: "Time Limit Exceeded (60 seconds)"
+                    }));
+                }
+
                 safeKillProcess();
             }
         }, 60000);
@@ -104,14 +114,14 @@ wss.on("connection", (ws) => {
                     return;
                 }
 
-                // Verify Docker is reachable before proceeding
+                // Verify Docker is reachable before proceeding - NEVER fallback to host/WSL
                 const isDockerReady = await checkDockerAvailable();
                 if (!isDockerReady) {
                     console.error("Docker daemon unreachable");
                     if (ws.readyState === WebSocket.OPEN) {
                         ws.send(JSON.stringify({
                             type: "error",
-                            data: "Docker execution is unavailable."
+                            data: "Docker execution environment is unavailable."
                         }));
                     }
                     return;
@@ -122,18 +132,22 @@ wss.on("connection", (ws) => {
                 currentTempDir = tempDir;
 
                 try {
-                    console.log("Compiling C program inside Docker...");
-                    await compileInDocker(data.code, tempDir);
+                    console.log("Compiling C program inside isolated Docker container...");
+                    const compileHandle = compileInDocker(data.code, tempDir);
+                    currentCompileSession = compileHandle;
 
-                    // Check if client disconnected during compilation
-                    if (ws.readyState !== WebSocket.OPEN) {
+                    await compileHandle.promise;
+                    currentCompileSession = null;
+
+                    // Check if client disconnected or stopped during compilation
+                    if (ws.readyState !== WebSocket.OPEN || stoppedByUser) {
                         isCompiling = false;
                         cleanupTempWorkspace(tempDir);
                         currentTempDir = null;
                         return;
                     }
 
-                    console.log("Docker compilation successful. Starting container execution...");
+                    console.log("Docker compilation successful. Starting hardened container execution...");
 
                     // Reset execution state
                     timedOut = false;
@@ -219,10 +233,7 @@ wss.on("connection", (ws) => {
                                     data: "Program stopped."
                                 }));
                             } else if (timedOut) {
-                                ws.send(JSON.stringify({
-                                    type: "timeout",
-                                    data: "Time Limit Exceeded (60 seconds)"
-                                }));
+                                // Timeout message already emitted upon timer expiration
                             } else {
                                 ws.send(JSON.stringify({
                                     type: "exit",
@@ -249,7 +260,7 @@ wss.on("connection", (ws) => {
                         if (ws.readyState === WebSocket.OPEN) {
                             ws.send(JSON.stringify({
                                 type: "error",
-                                data: "Docker execution is unavailable: " + err.message
+                                data: "Docker execution environment is unavailable: " + err.message
                             }));
                         }
                         if (currentTempDir) {
@@ -262,13 +273,23 @@ wss.on("connection", (ws) => {
 
                 } catch (error) {
                     isCompiling = false;
-                    console.log("Compilation or preparation failed:", error.message || error);
+                    currentCompileSession = null;
 
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({
-                            type: "error",
-                            data: error.message || "Compilation failed."
-                        }));
+                    if (stoppedByUser) {
+                        if (ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({
+                                type: "stopped",
+                                data: "Program stopped."
+                            }));
+                        }
+                    } else {
+                        console.log("Compilation or preparation error:", error.message || error);
+                        if (ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({
+                                type: "error",
+                                data: error.message || "Compilation failed."
+                            }));
+                        }
                     }
 
                     if (currentTempDir) {
@@ -308,15 +329,32 @@ wss.on("connection", (ws) => {
             }
 
             if (data.type === "stop") {
-                if (runningSession) {
-                    console.log("Stopping Docker container...");
+                stoppedByUser = true;
 
-                    stoppedByUser = true;
+                if (isCompiling && currentCompileSession) {
+                    console.log("Stopping active compilation...");
+                    currentCompileSession.kill();
+                    currentCompileSession = null;
+                    isCompiling = false;
+                    if (currentTempDir) {
+                        cleanupTempWorkspace(currentTempDir);
+                        currentTempDir = null;
+                    }
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({
+                            type: "stopped",
+                            data: "Program stopped."
+                        }));
+                    }
+                    return;
+                }
+
+                if (runningSession) {
+                    console.log("Stopping active Docker container...");
                     if (executionTimeout) {
                         clearTimeout(executionTimeout);
                         executionTimeout = null;
                     }
-
                     safeKillProcess();
                 }
             }
@@ -332,6 +370,11 @@ wss.on("connection", (ws) => {
         if (executionTimeout) {
             clearTimeout(executionTimeout);
             executionTimeout = null;
+        }
+
+        if (currentCompileSession) {
+            currentCompileSession.kill();
+            currentCompileSession = null;
         }
 
         safeKillProcess();
@@ -353,6 +396,6 @@ wss.on("connection", (ws) => {
 
 server.listen(PORT, () => {
     console.log(
-        `PrayogCode server running at http://localhost:${PORT} with Docker C Sandbox`
+        `PrayogCode server running at http://localhost:${PORT} with Hardened Docker C Sandbox`
     );
 });

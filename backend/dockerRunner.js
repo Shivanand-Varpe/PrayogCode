@@ -49,11 +49,9 @@ function cleanupTempWorkspace(tempDir) {
                 recursive: true,
                 force: true
             });
-            console.log("Workspace cleaned up:", tempDir);
         }
     } catch (error) {
-        console.log("Initial cleanup warning:", error.message);
-        // Deferred retry in case Windows file handle released with minor delay
+        // Deferred retry in case Windows file handle released with minor latency
         setTimeout(() => {
             try {
                 if (fs.existsSync(tempDir)) {
@@ -69,60 +67,93 @@ function cleanupTempWorkspace(tempDir) {
 
 /**
  * Compiles C source code inside an isolated Docker container.
- * Untrusted code is never compiled on the host.
+ * Security controls:
+ * - Direct GCC binary invocation (NO shell / sh -c)
+ * - Network disabled (--network none)
+ * - Read-only root filesystem (--read-only)
+ * - Ephemeral in-memory scratch space (--tmpfs /tmp:rw,nosuid,size=64m)
+ * - Cgroup limits (1 CPU, 128 MB RAM, 64 PIDs)
+ * - Dropped Linux capabilities (--cap-drop ALL)
+ * - Privilege escalation disabled (--security-opt no-new-privileges:true)
+ * - Non-root user (prayog, uid=1000)
+ * - Uniquely named container for deterministic cancellation
  *
  * @param {string} code - C source code
  * @param {string} tempDir - Workspace directory
- * @returns {Promise<{ tempDir: string, executable: string }>}
+ * @returns {{ promise: Promise<{ tempDir: string, executable: string }>, kill: Function }}
  */
 function compileInDocker(code, tempDir) {
-    return new Promise((resolve, reject) => {
-        const sourceFile = path.join(tempDir, "main.c");
+    const sourceFile = path.join(tempDir, "main.c");
+    const containerName = "prayog-cmp-" + crypto.randomBytes(8).toString("hex");
 
-        try {
-            fs.writeFileSync(sourceFile, code, "utf8");
-        } catch (error) {
-            reject({
+    try {
+        fs.writeFileSync(sourceFile, code, "utf8");
+    } catch (error) {
+        return {
+            promise: Promise.reject({
                 type: "file_error",
                 message: "Could not create source file: " + error.message
-            });
-            return;
-        }
+            }),
+            kill: () => {}
+        };
+    }
 
-        // Script injected into container to ensure unbuffered stdio for interactive prompts
-        const compileCommand =
-            "echo '#include <stdio.h>' > /tmp/init.h && " +
-            "echo 'void __attribute__((constructor)) __init_unbuffered(void){setvbuf(stdout,NULL,_IONBF,0);setvbuf(stderr,NULL,_IONBF,0);}' >> /tmp/init.h && " +
-            "gcc -O2 -Wall -Wextra -include /tmp/init.h /workspace/main.c -o /workspace/main.out -lm";
+    // Direct invocation of GCC without shell wrapper:
+    // Uses pre-baked /etc/prayog/init.h for unbuffered stdout/stderr
+    const compileArgs = [
+        "run",
+        "--name", containerName,
+        "--rm",
+        "--network", "none",
+        "--cpus", "1",
+        "--memory", "128m",
+        "--pids-limit", "64",
+        "--read-only",
+        "--tmpfs", "/tmp:rw,nosuid,size=64m",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges:true",
+        "-v", `${tempDir}:/workspace`,
+        DOCKER_IMAGE,
+        "gcc",
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-include", "/etc/prayog/init.h",
+        "/workspace/main.c",
+        "-o", "/workspace/main.out",
+        "-lm"
+    ];
 
-        const compileArgs = [
-            "run",
-            "--rm",
-            "--network", "none",
-            "--cpus", "1",
-            "--memory", "128m",
-            "--pids-limit", "64",
-            "--tmpfs", "/tmp:rw,nosuid,size=64m",
-            "--cap-drop", "ALL",
-            "--security-opt", "no-new-privileges:true",
-            "-v", `${tempDir}:/workspace`,
-            DOCKER_IMAGE,
-            "sh", "-c", compileCommand
-        ];
-
-        let compileProc;
-        try {
-            compileProc = spawn("docker", compileArgs, {
-                stdio: ["ignore", "pipe", "pipe"]
-            });
-        } catch (err) {
-            reject({
+    let compileProc;
+    try {
+        compileProc = spawn("docker", compileArgs, {
+            stdio: ["ignore", "pipe", "pipe"]
+        });
+    } catch (err) {
+        return {
+            promise: Promise.reject({
                 type: "docker_error",
-                message: "Docker execution is unavailable."
-            });
-            return;
-        }
+                message: "Docker execution environment is unavailable."
+            }),
+            kill: () => {}
+        };
+    }
 
+    let isKilled = false;
+    function kill() {
+        if (isKilled) return;
+        isKilled = true;
+        try {
+            compileProc.kill("SIGKILL");
+        } catch (_) {}
+        try {
+            // Force-remove container directly in Docker daemon immediately (handles running, created, paused, and exited states)
+            const remover = spawn("docker", ["rm", "-f", containerName]);
+            remover.on("error", () => {});
+        } catch (_) {}
+    }
+
+    const promise = new Promise((resolve, reject) => {
         let stdout = "";
         let stderr = "";
 
@@ -134,11 +165,9 @@ function compileInDocker(code, tempDir) {
             stderr += chunk.toString("utf8");
         });
 
-        // 15-second compilation timeout to prevent infinite macro/header loops
+        // 15-second compilation ceiling to prevent compiler hangs
         const compileTimeout = setTimeout(() => {
-            try {
-                compileProc.kill();
-            } catch (_) {}
+            kill();
             reject({
                 type: "compile_timeout",
                 message: "Compilation timed out (15 seconds)."
@@ -148,8 +177,15 @@ function compileInDocker(code, tempDir) {
         compileProc.on("close", (exitCode) => {
             clearTimeout(compileTimeout);
 
+            if (isKilled) {
+                reject({
+                    type: "compile_stopped",
+                    message: "Compilation cancelled."
+                });
+                return;
+            }
+
             if (exitCode !== 0) {
-                // Return clean compiler diagnostic without container internals
                 const cleanError = (stderr || stdout || "Compilation failed.")
                     .replace(/\/workspace\/main\.c/g, "main.c")
                     .trim();
@@ -172,19 +208,24 @@ function compileInDocker(code, tempDir) {
             clearTimeout(compileTimeout);
             reject({
                 type: "docker_error",
-                message: "Docker execution is unavailable: " + error.message
+                message: "Docker execution environment is unavailable: " + error.message
             });
         });
     });
+
+    return {
+        promise,
+        kill
+    };
 }
 
 /**
  * Spawns the compiled C executable inside a fresh, hardened Docker container.
  *
- * Security controls applied:
+ * Security controls:
  * - Read-only root filesystem (--read-only)
  * - Read-only source workspace volume mount (-v ...:/workspace:ro)
- * - Temporary in-memory writable tmpfs (--tmpfs /tmp:rw,exec,nosuid,size=64m)
+ * - Ephemeral in-memory writable tmpfs (--tmpfs /tmp:rw,exec,nosuid,size=64m)
  * - Network isolation (--network none)
  * - CPU limit (--cpus 1)
  * - Memory limit (--memory 128m)
@@ -192,12 +233,14 @@ function compileInDocker(code, tempDir) {
  * - Dropped capabilities (--cap-drop ALL)
  * - Non-root user (prayog, uid=1000)
  * - Privilege escalation disabled (--security-opt no-new-privileges:true)
+ * - Direct execution of binary without shell
+ * - Dedicated unique container name
  *
  * @param {string} tempDir - Directory containing compiled main.out
  * @returns {object} Session handle with proc, containerName, write(), and kill()
  */
 function runInDocker(tempDir) {
-    const containerName = "prayog-" + crypto.randomBytes(8).toString("hex");
+    const containerName = "prayog-run-" + crypto.randomBytes(8).toString("hex");
 
     const runArgs = [
         "run",
@@ -228,13 +271,22 @@ function runInDocker(tempDir) {
         isKilled = true;
 
         try {
-            proc.kill();
+            if (proc.stdin && !proc.stdin.destroyed) {
+                proc.stdin.destroy();
+            }
+            if (proc.stdout && !proc.stdout.destroyed) {
+                proc.stdout.destroy();
+            }
+            if (proc.stderr && !proc.stderr.destroyed) {
+                proc.stderr.destroy();
+            }
+            proc.kill("SIGKILL");
         } catch (_) {}
 
         try {
-            // Forcefully terminate container in Docker daemon to prevent orphan containers
-            const killer = spawn("docker", ["kill", containerName]);
-            killer.on("error", () => {});
+            // Force-remove container directly in Docker daemon immediately (handles running, created, paused, and exited states)
+            const remover = spawn("docker", ["rm", "-f", containerName]);
+            remover.on("error", () => {});
         } catch (_) {}
     }
 
@@ -264,4 +316,3 @@ module.exports = {
     compileInDocker,
     runInDocker
 };
-
