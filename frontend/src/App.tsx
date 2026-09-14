@@ -67,6 +67,11 @@ int main() {
         term.writeln("⏱️ " + message.data);
       }
 
+      if (message.type === "stopped") {
+        term.writeln("");
+        term.writeln("⏹️ " + (message.data || "Program stopped."));
+      }
+
       if (message.type === "stdout") {
         term.write(message.data);
       }
@@ -103,6 +108,11 @@ int main() {
     };
 
     term.onData((data) => {
+      // Filter out focus reporting escape sequences
+      if (data === "\x1b[I" || data === "\x1b[O") {
+        return;
+      }
+
       if (
         socket.readyState === WebSocket.OPEN
       ) {
@@ -155,6 +165,7 @@ int main() {
       })
     );
   };
+
   const stopCode = () => {
     if (
       ws.current &&
@@ -194,23 +205,8 @@ int main() {
       <main className="workspace">
         <section className="editor-panel">
           <div className="panel-title">
-            <span>Terminal</span>
-
-            <div className="terminal-actions">
-              <button
-                className="clear-button"
-                onClick={clearTerminal}
-              >
-                Clear
-              </button>
-
-              <button
-                className="stop-button"
-                onClick={stopCode}
-              >
-                Stop
-              </button>
-            </div>
+            <span>main.c</span>
+            <span>C</span>
           </div>
 
           <Editor
@@ -234,6 +230,22 @@ int main() {
         <section className="terminal-panel">
           <div className="panel-title">
             <span>Terminal</span>
+
+            <div className="terminal-actions">
+              <button
+                className="clear-button"
+                onClick={clearTerminal}
+              >
+                Clear
+              </button>
+
+              <button
+                className="stop-button"
+                onClick={stopCode}
+              >
+                Stop
+              </button>
+            </div>
           </div>
 
           <div

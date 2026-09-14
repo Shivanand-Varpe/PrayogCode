@@ -20,12 +20,10 @@ function cleanupTempFolder(tempDir) {
 
         console.log("Temporary files cleaned up");
     } catch (error) {
-        console.log(
-            "Cleanup error:",
-            error.message
-        );
+        console.log("Cleanup error:", error.message);
     }
 }
+
 app.use(cors());
 app.use(express.json());
 
@@ -43,6 +41,21 @@ wss.on("connection", (ws) => {
 
     let runningProcess = null;
     let timedOut = false;
+    let stoppedByUser = false;
+    let executionTimeout = null;
+
+    function resetTimeout() {
+        if (executionTimeout) {
+            clearTimeout(executionTimeout);
+        }
+        executionTimeout = setTimeout(() => {
+            if (runningProcess) {
+                console.log("Execution timeout");
+                timedOut = true;
+                runningProcess.kill();
+            }
+        }, 60000);
+    }
 
     ws.on("message", async (message) => {
         try {
@@ -68,8 +81,9 @@ wss.on("connection", (ws) => {
                     console.log("Starting WSL program:", result.executable);
 
                     const wslExecutable = result.executable;
-                    
+
                     timedOut = false;
+                    stoppedByUser = false;
 
                     runningProcess = pty.spawn(
                         "wsl.exe",
@@ -92,28 +106,34 @@ wss.on("connection", (ws) => {
                         );
 
                         if (ws.readyState === WebSocket.OPEN) {
-                            ws.send(JSON.stringify({
-                                type: "stdout",
-                                data: output
-                            }));
+                            // Filter out focus-reporting terminal modes from ConPTY
+                            const cleanOutput = output.replace(/\x1b\[\?1004[hl]/g, "");
+                            if (cleanOutput.length > 0) {
+                                ws.send(JSON.stringify({
+                                    type: "stdout",
+                                    data: cleanOutput
+                                }));
+                            }
                         }
                     });
-                    const timeout = setTimeout(() => {
-                        if (runningProcess) {
-                            console.log("Execution timeout");
 
-                            timedOut = true;
+                    resetTimeout();
 
-                            runningProcess.kill();
-                        }
-                    }, 60000);
                     runningProcess.onExit(({ exitCode }) => {
-                        clearTimeout(timeout);
+                        if (executionTimeout) {
+                            clearTimeout(executionTimeout);
+                            executionTimeout = null;
+                        }
 
                         console.log("Process exited:", exitCode);
 
                         if (ws.readyState === WebSocket.OPEN) {
-                            if (timedOut) {
+                            if (stoppedByUser) {
+                                ws.send(JSON.stringify({
+                                    type: "stopped",
+                                    data: "Program stopped."
+                                }));
+                            } else if (timedOut) {
                                 ws.send(JSON.stringify({
                                     type: "timeout",
                                     data: "Time Limit Exceeded (60 seconds)"
@@ -129,6 +149,7 @@ wss.on("connection", (ws) => {
                         runningProcess = null;
                         cleanupTempFolder(result.tempDir);
                         timedOut = false;
+                        stoppedByUser = false;
                     });
 
                 } catch (error) {
@@ -144,26 +165,41 @@ wss.on("connection", (ws) => {
             }
 
             if (data.type === "input") {
-                if (runningProcess) {
+                if (runningProcess && typeof data.data === "string") {
+                    // Ignore focus reporting escape sequences (\u001b[I, \u001b[O)
+                    if (data.data === "\x1b[I" || data.data === "\x1b[O") {
+                        return;
+                    }
+
                     console.log(
                         "Input sent:",
                         JSON.stringify(data.data)
                     );
 
                     runningProcess.write(data.data);
+
+                    // Reset inactivity timeout when user enters input so user can have arbitrary delays
+                    resetTimeout();
                 }
             }
+
             if (data.type === "stop") {
                 if (runningProcess) {
                     console.log("Stopping C program...");
 
-                    runningProcess.kill();
-                    runningProcess = null;
+                    stoppedByUser = true;
+                    if (executionTimeout) {
+                        clearTimeout(executionTimeout);
+                        executionTimeout = null;
+                    }
 
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({
-                            type: "stopped"
-                        }));
+                    try {
+                        runningProcess.kill();
+                    } catch (error) {
+                        console.log(
+                            "Process termination error:",
+                            error.message
+                        );
                     }
                 }
             }
@@ -175,6 +211,11 @@ wss.on("connection", (ws) => {
 
     ws.on("close", () => {
         console.log("Terminal disconnected");
+
+        if (executionTimeout) {
+            clearTimeout(executionTimeout);
+            executionTimeout = null;
+        }
 
         if (runningProcess) {
             runningProcess.kill();
