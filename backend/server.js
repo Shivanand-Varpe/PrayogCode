@@ -2,9 +2,13 @@ const express = require("express");
 const cors = require("cors");
 const http = require("http");
 const WebSocket = require("ws");
-const pty = require("node-pty");
-const fs = require("fs");
-const { compileC } = require("./compiler");
+const {
+    checkDockerAvailable,
+    createTempWorkspace,
+    cleanupTempWorkspace,
+    compileInDocker,
+    runInDocker
+} = require("./dockerRunner");
 
 const app = express();
 const PORT = 3000;
@@ -17,33 +21,17 @@ process.on("unhandledRejection", (reason) => {
     console.error("Unhandled promise rejection:", reason);
 });
 
-// Stage 2.5 Security and Resource Limits
+// Security and Resource Limits
 const MAX_SOURCE_SIZE = 100 * 1024;        // 100 KB
 const MAX_OUTPUT_SIZE = 1 * 1024 * 1024;    // 1 MB
 const MAX_INPUT_PAYLOAD = 64 * 1024;       // 64 KB
-
-function cleanupTempFolder(tempDir) {
-    if (!tempDir) return;
-
-    try {
-        if (fs.existsSync(tempDir)) {
-            fs.rmSync(tempDir, {
-                recursive: true,
-                force: true
-            });
-            console.log("Temporary files cleaned up:", tempDir);
-        }
-    } catch (error) {
-        console.log("Cleanup error:", error.message);
-    }
-}
 
 app.use(cors());
 app.use(express.json());
 
 app.get("/", (req, res) => {
     res.json({
-        message: "PrayogCode C Compiler Backend is running!"
+        message: "PrayogCode C Compiler Backend is running (Docker Sandbox)!"
     });
 });
 
@@ -53,7 +41,7 @@ const wss = new WebSocket.Server({ server });
 wss.on("connection", (ws) => {
     console.log("Terminal connected");
 
-    let runningProcess = null;
+    let runningSession = null;
     let isCompiling = false;
     let currentTempDir = null;
     let timedOut = false;
@@ -64,13 +52,13 @@ wss.on("connection", (ws) => {
     let isKilling = false;
 
     function safeKillProcess() {
-        if (!runningProcess || isKilling) return;
+        if (!runningSession || isKilling) return;
         isKilling = true;
-        const proc = runningProcess;
+        const session = runningSession;
         try {
-            proc.kill();
+            session.kill();
         } catch (err) {
-            console.log("Safe kill error:", err.message);
+            console.log("Safe kill warning:", err.message);
         }
     }
 
@@ -79,8 +67,8 @@ wss.on("connection", (ws) => {
             clearTimeout(executionTimeout);
         }
         executionTimeout = setTimeout(() => {
-            if (runningProcess) {
-                console.log("Execution timeout");
+            if (runningSession) {
+                console.log("Execution timeout (60 seconds)");
                 timedOut = true;
                 safeKillProcess();
             }
@@ -95,7 +83,7 @@ wss.on("connection", (ws) => {
 
             if (data.type === "run") {
                 // Prevent duplicate runs while process is active or compiling
-                if (runningProcess || isCompiling) {
+                if (runningSession || isCompiling) {
                     if (ws.readyState === WebSocket.OPEN) {
                         ws.send(JSON.stringify({
                             type: "error",
@@ -105,7 +93,7 @@ wss.on("connection", (ws) => {
                     return;
                 }
 
-                // Stage 2.5.1: Source code size restriction (100 KB)
+                // Source code size restriction (100 KB)
                 if (Buffer.byteLength(data.code || "", "utf8") > MAX_SOURCE_SIZE) {
                     if (ws.readyState === WebSocket.OPEN) {
                         ws.send(JSON.stringify({
@@ -116,25 +104,36 @@ wss.on("connection", (ws) => {
                     return;
                 }
 
+                // Verify Docker is reachable before proceeding
+                const isDockerReady = await checkDockerAvailable();
+                if (!isDockerReady) {
+                    console.error("Docker daemon unreachable");
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({
+                            type: "error",
+                            data: "Docker execution is unavailable."
+                        }));
+                    }
+                    return;
+                }
+
                 isCompiling = true;
+                const tempDir = createTempWorkspace();
+                currentTempDir = tempDir;
 
                 try {
-                    console.log("Compiling C program...");
+                    console.log("Compiling C program inside Docker...");
+                    await compileInDocker(data.code, tempDir);
 
-                    const result = await compileC(data.code);
-
-                    // Check if client disconnected while compiling
+                    // Check if client disconnected during compilation
                     if (ws.readyState !== WebSocket.OPEN) {
                         isCompiling = false;
-                        cleanupTempFolder(result.tempDir);
+                        cleanupTempWorkspace(tempDir);
+                        currentTempDir = null;
                         return;
                     }
 
-                    console.log("Compilation successful");
-                    console.log("Starting WSL program:", result.executable);
-
-                    currentTempDir = result.tempDir;
-                    const wslExecutable = result.executable;
+                    console.log("Docker compilation successful. Starting container execution...");
 
                     // Reset execution state
                     timedOut = false;
@@ -143,40 +142,22 @@ wss.on("connection", (ws) => {
                     totalOutputBytes = 0;
                     isKilling = false;
 
-                    runningProcess = pty.spawn(
-                        "wsl.exe",
-                        ["--", wslExecutable],
-                        {
-                            name: "xterm-color",
-                            cols: 100,
-                            rows: 30,
-                            cwd: result.tempDir,
-                            env: process.env
-                        }
-                    );
-
+                    runningSession = runInDocker(tempDir);
                     isCompiling = false;
-                    console.log("C program started inside WSL");
 
-                    // Stage 2.5.2: Output size limit accounting (1 MB max)
-                    runningProcess.onData((output) => {
-                        // If output limit already triggered, drop subsequent chunks immediately
-                        if (outputLimitHit) {
-                            return;
-                        }
+                    const handleOutput = (chunk) => {
+                        if (outputLimitHit) return;
 
-                        // Filter out focus-reporting terminal modes from ConPTY
-                        const cleanOutput = output.replace(/\x1b\[\?1004[hl]/g, "");
-                        if (cleanOutput.length === 0) {
-                            return;
-                        }
+                        const chunkStr = chunk.toString("utf8");
+                        // Filter out focus-reporting terminal modes
+                        const cleanOutput = chunkStr.replace(/\x1b\[\?1004[hl]/g, "");
+                        if (cleanOutput.length === 0) return;
 
                         const chunkBytes = Buffer.byteLength(cleanOutput, "utf8");
 
                         if (totalOutputBytes + chunkBytes >= MAX_OUTPUT_SIZE) {
                             outputLimitHit = true;
 
-                            // Send partial chunk up to 1 MB limit if space remains
                             const remaining = MAX_OUTPUT_SIZE - totalOutputBytes;
                             if (remaining > 0 && ws.readyState === WebSocket.OPEN) {
                                 const buf = Buffer.from(cleanOutput, "utf8");
@@ -214,21 +195,24 @@ wss.on("connection", (ws) => {
                                 data: cleanOutput
                             }));
                         }
-                    });
+                    };
+
+                    runningSession.proc.stdout.on("data", handleOutput);
+                    runningSession.proc.stderr.on("data", handleOutput);
 
                     resetTimeout();
 
-                    runningProcess.onExit(({ exitCode }) => {
+                    runningSession.proc.on("close", (exitCode) => {
                         if (executionTimeout) {
                             clearTimeout(executionTimeout);
                             executionTimeout = null;
                         }
 
-                        console.log("Process exited:", exitCode);
+                        console.log("Container process exited with code:", exitCode);
 
                         if (ws.readyState === WebSocket.OPEN) {
                             if (outputLimitHit) {
-                                // Output limit already sent its error notification
+                                // Error already sent
                             } else if (stoppedByUser) {
                                 ws.send(JSON.stringify({
                                     type: "stopped",
@@ -242,14 +226,14 @@ wss.on("connection", (ws) => {
                             } else {
                                 ws.send(JSON.stringify({
                                     type: "exit",
-                                    code: exitCode
+                                    code: exitCode !== null ? exitCode : 0
                                 }));
                             }
                         }
 
-                        runningProcess = null;
+                        runningSession = null;
                         if (currentTempDir) {
-                            cleanupTempFolder(currentTempDir);
+                            cleanupTempWorkspace(currentTempDir);
                             currentTempDir = null;
                         }
                         isCompiling = false;
@@ -260,15 +244,36 @@ wss.on("connection", (ws) => {
                         isKilling = false;
                     });
 
+                    runningSession.proc.on("error", (err) => {
+                        console.error("Docker container spawn error:", err.message);
+                        if (ws.readyState === WebSocket.OPEN) {
+                            ws.send(JSON.stringify({
+                                type: "error",
+                                data: "Docker execution is unavailable: " + err.message
+                            }));
+                        }
+                        if (currentTempDir) {
+                            cleanupTempWorkspace(currentTempDir);
+                            currentTempDir = null;
+                        }
+                        runningSession = null;
+                        isCompiling = false;
+                    });
+
                 } catch (error) {
                     isCompiling = false;
-                    console.log("Compilation failed");
+                    console.log("Compilation or preparation failed:", error.message || error);
 
                     if (ws.readyState === WebSocket.OPEN) {
                         ws.send(JSON.stringify({
                             type: "error",
                             data: error.message || "Compilation failed."
                         }));
+                    }
+
+                    if (currentTempDir) {
+                        cleanupTempWorkspace(currentTempDir);
+                        currentTempDir = null;
                     }
                 }
             }
@@ -278,7 +283,7 @@ wss.on("connection", (ws) => {
                     return;
                 }
 
-                // Stage 2.5.3: Input payload limit (64 KB)
+                // Input payload limit (64 KB)
                 if (Buffer.byteLength(data.data, "utf8") > MAX_INPUT_PAYLOAD) {
                     console.log("Rejected oversized input message (>64 KB)");
                     if (ws.readyState === WebSocket.OPEN) {
@@ -287,34 +292,24 @@ wss.on("connection", (ws) => {
                             data: "Input is too large. Maximum input size: 64 KB."
                         }));
                     }
-                    return; // Do NOT kill the process; keep interactive session alive
+                    return; // Keep session alive
                 }
 
-                if (runningProcess) {
-                    // Ignore focus reporting escape sequences (\u001b[I, \u001b[O)
+                if (runningSession) {
                     if (data.data === "\x1b[I" || data.data === "\x1b[O") {
                         return;
                     }
 
-                    console.log(
-                        "Input sent:",
-                        JSON.stringify(data.data)
-                    );
+                    console.log("Input sent to container:", JSON.stringify(data.data));
 
-                    try {
-                        runningProcess.write(data.data);
-                    } catch (err) {
-                        console.log("Input write error:", err.message);
-                    }
-
-                    // Reset inactivity timeout when user enters input
+                    runningSession.write(data.data);
                     resetTimeout();
                 }
             }
 
             if (data.type === "stop") {
-                if (runningProcess) {
-                    console.log("Stopping C program...");
+                if (runningSession) {
+                    console.log("Stopping Docker container...");
 
                     stoppedByUser = true;
                     if (executionTimeout) {
@@ -327,7 +322,7 @@ wss.on("connection", (ws) => {
             }
 
         } catch (error) {
-            console.log("Message error:", error.message);
+            console.log("Message processing error:", error.message);
         }
     });
 
@@ -340,10 +335,10 @@ wss.on("connection", (ws) => {
         }
 
         safeKillProcess();
-        runningProcess = null;
+        runningSession = null;
 
         if (currentTempDir) {
-            cleanupTempFolder(currentTempDir);
+            cleanupTempWorkspace(currentTempDir);
             currentTempDir = null;
         }
 
@@ -358,6 +353,6 @@ wss.on("connection", (ws) => {
 
 server.listen(PORT, () => {
     console.log(
-        `PrayogCode server running at http://localhost:${PORT}`
+        `PrayogCode server running at http://localhost:${PORT} with Docker C Sandbox`
     );
 });
