@@ -3,11 +3,29 @@ const cors = require("cors");
 const http = require("http");
 const WebSocket = require("ws");
 const pty = require("node-pty");
+const fs = require("fs");
 const { compileC } = require("./compiler");
 
 const app = express();
 const PORT = 3000;
 
+function cleanupTempFolder(tempDir) {
+    if (!tempDir) return;
+
+    try {
+        fs.rmSync(tempDir, {
+            recursive: true,
+            force: true
+        });
+
+        console.log("Temporary files cleaned up");
+    } catch (error) {
+        console.log(
+            "Cleanup error:",
+            error.message
+        );
+    }
+}
 app.use(cors());
 app.use(express.json());
 
@@ -109,6 +127,7 @@ wss.on("connection", (ws) => {
                         }
 
                         runningProcess = null;
+                        cleanupTempFolder(result.tempDir);
                         timedOut = false;
                     });
 
