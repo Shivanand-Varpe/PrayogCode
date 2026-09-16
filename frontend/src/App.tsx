@@ -31,10 +31,163 @@ function App() {
   const ws = useRef<WebSocket | null>(null);
   const terminal = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const isConnectingRef = useRef(false);
+  const isMountedRef = useRef(true);
+  const appStateRef = useRef<AppState>(appState);
+  appStateRef.current = appState;
 
-  // Initialize xterm and WebSocket
+  const connectWebSocket = useCallback(() => {
+    if (!isMountedRef.current) return;
+
+    // Prevent duplicate simultaneous connections
+    if (
+      ws.current &&
+      (ws.current.readyState === WebSocket.OPEN ||
+        ws.current.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
+    }
+
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    ws.current = socket;
+    isConnectingRef.current = true;
+
+    // Watchdog to prevent permanent stuck "Connecting..." on hung socket
+    const connectWatchdog = window.setTimeout(() => {
+      if (socket.readyState === WebSocket.CONNECTING) {
+        console.log("WebSocket connection attempt timed out");
+        try {
+          socket.close();
+        } catch (_) {}
+        isConnectingRef.current = false;
+        setConnected(false);
+      }
+    }, 5000);
+
+    socket.onopen = () => {
+      window.clearTimeout(connectWatchdog);
+      isConnectingRef.current = false;
+      console.log("WebSocket connected");
+      setConnected(true);
+      if (appStateRef.current === "ERROR") {
+        setAppState("IDLE");
+        setStatusMessage("Ready");
+      }
+    };
+
+    socket.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        console.log("Backend message:", message);
+
+        if (message.type === "stdout") {
+          // Once output is emitted, ensure state is RUNNING
+          setAppState("RUNNING");
+          setStatusMessage("Running");
+          terminal.current?.write(message.data);
+        } else if (message.type === "stderr") {
+          terminal.current?.write(message.data);
+        } else if (message.type === "exit") {
+          terminal.current?.writeln("");
+          if (message.code === 0) {
+            terminal.current?.writeln(`\x1b[32mProcess exited with code ${message.code}\x1b[0m`);
+            setAppState("FINISHED");
+            setStatusMessage("Exit Code: 0");
+          } else {
+            terminal.current?.writeln(`\x1b[31mProcess exited with code ${message.code}\x1b[0m`);
+            setAppState("ERROR");
+            setStatusMessage(`Exit Code: ${message.code}`);
+          }
+        } else if (message.type === "stopped") {
+          terminal.current?.writeln("");
+          terminal.current?.writeln(`\x1b[33m${message.data || "Program stopped."}\x1b[0m`);
+          setAppState("FINISHED");
+          setStatusMessage("Stopped");
+        } else if (message.type === "timeout") {
+          terminal.current?.writeln("");
+          terminal.current?.writeln(`\x1b[31m${message.data || "Time Limit Exceeded (60 seconds)"}\x1b[0m`);
+          setAppState("ERROR");
+          setStatusMessage("Timeout");
+        } else if (message.type === "error") {
+          terminal.current?.writeln("");
+          terminal.current?.writeln(`\x1b[31m${message.data}\x1b[0m`);
+          setAppState("ERROR");
+          setStatusMessage("Error");
+        }
+      } catch (err) {
+        console.error("Failed to parse WebSocket message:", err);
+      }
+    };
+
+    socket.onerror = () => {
+      window.clearTimeout(connectWatchdog);
+      isConnectingRef.current = false;
+      console.log("WebSocket error");
+      setConnected(false);
+      if (appStateRef.current === "RUNNING" || appStateRef.current === "COMPILING") {
+        setAppState("ERROR");
+        setStatusMessage("Disconnected");
+        terminal.current?.writeln("\x1b[31mCould not connect to compiler backend.\x1b[0m");
+      }
+    };
+
+    socket.onclose = () => {
+      window.clearTimeout(connectWatchdog);
+      isConnectingRef.current = false;
+      console.log("WebSocket closed");
+      setConnected(false);
+
+      if (!isMountedRef.current) return;
+
+      // When idle, schedule a controlled reconnect attempt
+      if (appStateRef.current !== "RUNNING" && appStateRef.current !== "COMPILING") {
+        if (reconnectTimerRef.current === null) {
+          reconnectTimerRef.current = window.setTimeout(() => {
+            reconnectTimerRef.current = null;
+            if (document.visibilityState === "visible") {
+              connectWebSocket();
+            }
+          }, 2000);
+        }
+      }
+    };
+  }, []);
+
+  // Reconnect idle WebSocket when the browser tab is resumed
+  useEffect(() => {
+    const handleResume = () => {
+      if (document.visibilityState === "visible") {
+        if (
+          !ws.current ||
+          ws.current.readyState === WebSocket.CLOSED ||
+          ws.current.readyState === WebSocket.CLOSING
+        ) {
+          console.log("Tab resumed, reconnecting idle WebSocket...");
+          connectWebSocket();
+        }
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleResume);
+    window.addEventListener("focus", handleResume);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleResume);
+      window.removeEventListener("focus", handleResume);
+    };
+  }, [connectWebSocket]);
+
+  // Initialize xterm and initial WebSocket
   useEffect(() => {
     if (!terminalRef.current) return;
+    isMountedRef.current = true;
 
     const term = new Terminal({
       cursorBlink: true,
@@ -78,71 +231,9 @@ function App() {
     // Show initial Stitch empty state
     term.writeln("\x1b[90mRun your C program to see the output here.\x1b[0m");
 
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${protocol}//${window.location.host}`);
-    ws.current = socket;
-
-    socket.onopen = () => {
-      console.log("WebSocket connected");
-      setConnected(true);
-    };
-
-    socket.onmessage = (event) => {
-      const message = JSON.parse(event.data);
-      console.log("Backend message:", message);
-
-      if (message.type === "stdout") {
-        // Once output is emitted, ensure state is RUNNING
-        setAppState("RUNNING");
-        setStatusMessage("Running");
-        term.write(message.data);
-      } else if (message.type === "stderr") {
-        term.write(message.data);
-      } else if (message.type === "exit") {
-        term.writeln("");
-        if (message.code === 0) {
-          term.writeln(`\x1b[32mProcess exited with code ${message.code}\x1b[0m`);
-          setAppState("FINISHED");
-          setStatusMessage("Exit Code: 0");
-        } else {
-          term.writeln(`\x1b[31mProcess exited with code ${message.code}\x1b[0m`);
-          setAppState("ERROR");
-          setStatusMessage(`Exit Code: ${message.code}`);
-        }
-      } else if (message.type === "stopped") {
-        term.writeln("");
-        term.writeln(`\x1b[33m${message.data || "Program stopped."}\x1b[0m`);
-        setAppState("FINISHED");
-        setStatusMessage("Stopped");
-      } else if (message.type === "timeout") {
-        term.writeln("");
-        term.writeln(`\x1b[31m${message.data || "Time Limit Exceeded (60 seconds)"}\x1b[0m`);
-        setAppState("ERROR");
-        setStatusMessage("Timeout");
-      } else if (message.type === "error") {
-        term.writeln("");
-        term.writeln(`\x1b[31m${message.data}\x1b[0m`);
-        setAppState("ERROR");
-        setStatusMessage("Error");
-      }
-    };
-
-    socket.onerror = () => {
-      console.log("WebSocket error");
-      setConnected(false);
-      setAppState("ERROR");
-      setStatusMessage("Disconnected");
-      term.writeln("\x1b[31mCould not connect to compiler backend.\x1b[0m");
-    };
-
-    socket.onclose = () => {
-      console.log("WebSocket closed");
-      setConnected(false);
-    };
-
     term.onData((data) => {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(
+      if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+        ws.current.send(
           JSON.stringify({
             type: "input",
             data: data,
@@ -161,12 +252,23 @@ function App() {
 
     window.addEventListener("resize", handleResize);
 
+    // Initial connection
+    connectWebSocket();
+
     return () => {
+      isMountedRef.current = false;
+      if (reconnectTimerRef.current !== null) {
+        window.clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
       window.removeEventListener("resize", handleResize);
-      socket.close();
+      if (ws.current) {
+        ws.current.close();
+        ws.current = null;
+      }
       term.dispose();
     };
-  }, []);
+  }, [connectWebSocket]);
 
   // Fit terminal on tab switch or visibility change
   useEffect(() => {
