@@ -211,12 +211,11 @@ wss.on("connection", (ws) => {
                         }
                     };
 
-                    runningSession.proc.stdout.on("data", handleOutput);
-                    runningSession.proc.stderr.on("data", handleOutput);
+                    runningSession.onData(handleOutput);
 
                     resetTimeout();
 
-                    runningSession.proc.on("close", (exitCode) => {
+                    runningSession.onExit(({ exitCode }) => {
                         if (executionTimeout) {
                             clearTimeout(executionTimeout);
                             executionTimeout = null;
@@ -237,7 +236,7 @@ wss.on("connection", (ws) => {
                             } else {
                                 ws.send(JSON.stringify({
                                     type: "exit",
-                                    code: exitCode !== null ? exitCode : 0
+                                    code: exitCode !== null && exitCode !== undefined ? exitCode : 0
                                 }));
                             }
                         }
@@ -253,22 +252,6 @@ wss.on("connection", (ws) => {
                         outputLimitHit = false;
                         totalOutputBytes = 0;
                         isKilling = false;
-                    });
-
-                    runningSession.proc.on("error", (err) => {
-                        console.error("Docker container spawn error:", err.message);
-                        if (ws.readyState === WebSocket.OPEN) {
-                            ws.send(JSON.stringify({
-                                type: "error",
-                                data: "Docker execution environment is unavailable: " + err.message
-                            }));
-                        }
-                        if (currentTempDir) {
-                            cleanupTempWorkspace(currentTempDir);
-                            currentTempDir = null;
-                        }
-                        runningSession = null;
-                        isCompiling = false;
                     });
 
                 } catch (error) {

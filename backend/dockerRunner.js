@@ -3,6 +3,25 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
+const pty = require("node-pty");
+
+/**
+ * Resolves the docker executable path across platforms.
+ * @returns {string}
+ */
+function getDockerPath() {
+    const pathDirs = (process.env.PATH || "").split(path.delimiter);
+    const extensions = process.platform === "win32" ? [".exe", ".cmd", ".bat", ""] : [""];
+    for (const dir of pathDirs) {
+        for (const ext of extensions) {
+            const fullPath = path.join(dir, "docker" + ext);
+            if (fs.existsSync(fullPath)) {
+                return fullPath;
+            }
+        }
+    }
+    return "docker";
+}
 
 const DOCKER_IMAGE = "prayogcode-c-runner:latest";
 
@@ -247,6 +266,7 @@ function runInDocker(tempDir) {
         "--name", containerName,
         "--rm",
         "-i",
+        "-t",
         "--network", "none",
         "--cpus", "1",
         "--memory", "128m",
@@ -260,8 +280,11 @@ function runInDocker(tempDir) {
         "/workspace/main.out"
     ];
 
-    const proc = spawn("docker", runArgs, {
-        stdio: ["pipe", "pipe", "pipe"]
+    const ptyProcess = pty.spawn(getDockerPath(), runArgs, {
+        name: "xterm-color",
+        cols: 80,
+        rows: 24,
+        env: process.env
     });
 
     let isKilled = false;
@@ -271,16 +294,7 @@ function runInDocker(tempDir) {
         isKilled = true;
 
         try {
-            if (proc.stdin && !proc.stdin.destroyed) {
-                proc.stdin.destroy();
-            }
-            if (proc.stdout && !proc.stdout.destroyed) {
-                proc.stdout.destroy();
-            }
-            if (proc.stderr && !proc.stderr.destroyed) {
-                proc.stderr.destroy();
-            }
-            proc.kill("SIGKILL");
+            ptyProcess.kill();
         } catch (_) {}
 
         try {
@@ -291,18 +305,37 @@ function runInDocker(tempDir) {
     }
 
     function write(data) {
-        if (!isKilled && proc.stdin && !proc.stdin.destroyed) {
+        if (!isKilled) {
             try {
-                proc.stdin.write(data);
+                ptyProcess.write(data);
             } catch (err) {
-                console.log("Docker stdin write warning:", err.message);
+                console.log("Docker PTY stdin write warning:", err.message);
             }
         }
     }
 
+    const procAdapter = {
+        stdout: {
+            on: (event, cb) => {
+                if (event === "data") ptyProcess.onData(cb);
+            }
+        },
+        stderr: {
+            on: () => {}
+        },
+        on: (event, cb) => {
+            if (event === "close" || event === "exit") {
+                ptyProcess.onExit(({ exitCode }) => cb(exitCode));
+            }
+        }
+    };
+
     return {
-        proc,
+        proc: procAdapter,
+        ptyProcess,
         containerName,
+        onData: (cb) => ptyProcess.onData(cb),
+        onExit: (cb) => ptyProcess.onExit(cb),
         write,
         kill
     };

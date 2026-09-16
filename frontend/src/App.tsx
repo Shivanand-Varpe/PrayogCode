@@ -141,11 +141,6 @@ function App() {
     };
 
     term.onData((data) => {
-      // Filter out terminal focus reporting escape sequences from ConPTY
-      if (data === "\x1b[I" || data === "\x1b[O") {
-        return;
-      }
-
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(
           JSON.stringify({
