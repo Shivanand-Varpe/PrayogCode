@@ -195,6 +195,7 @@ function App() {
       fontSize: 13,
       fontFamily: "'JetBrains Mono', Consolas, Menlo, Monaco, monospace",
       lineHeight: 1.45,
+      convertEol: true,
       theme: {
         background: "#101115",
         foreground: "#d4d4d8",
