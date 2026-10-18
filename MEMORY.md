@@ -9,13 +9,13 @@
 ## Architecture Overview
 
 ```
-┌──────────────────────────┐        WebSocket (ws://localhost:3000)        ┌────────────────────────────┐
-│       FRONTEND           │ ◄──────────────────────────────────────────► │         BACKEND            │
+┌──────────────────────────┐        WebSocket (ws://localhost:3000)      ┌────────────────────────────┐
+│       FRONTEND           │ ◄─────────────────────────────────────────► │         BACKEND            │
 │  React + TypeScript      │   Messages: run, stop, input, stdout,       │  Express + ws (WebSocket)  │
 │  Vite dev server (:5173) │             stderr, error, exit, stopped,   │  Port 3000                 │
 │  Monaco Editor           │             timeout                         │  node-pty pseudo-terminal  │
-│  xterm.js + FitAddon     │                                              │  wsl.exe + GCC             │
-└──────────────────────────┘                                              └────────────────────────────┘
+│  xterm.js + FitAddon     │                                             │  wsl.exe + GCC             │
+└──────────────────────────┘                                             └────────────────────────────┘
 ```
 
 **Monorepo structure** with three top-level directories and no workspace/package manager orchestration (no root package.json).
