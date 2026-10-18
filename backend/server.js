@@ -27,7 +27,6 @@ const MAX_OUTPUT_SIZE = 1 * 1024 * 1024;    // 1 MB
 const MAX_INPUT_PAYLOAD = 64 * 1024;       // 64 KB
 
 app.use(cors());
-app.use(express.json());
 
 app.get("/", (req, res) => {
     res.json({

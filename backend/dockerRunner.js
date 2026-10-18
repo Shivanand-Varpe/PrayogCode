@@ -256,7 +256,7 @@ function compileInDocker(code, tempDir) {
  * - Dedicated unique container name
  *
  * @param {string} tempDir - Directory containing compiled main.out
- * @returns {object} Session handle with proc, containerName, write(), and kill()
+ * @returns {object} Session handle with containerName, onData, onExit, write, and kill
  */
 function runInDocker(tempDir) {
     const containerName = "prayog-run-" + crypto.randomBytes(8).toString("hex");
@@ -314,25 +314,7 @@ function runInDocker(tempDir) {
         }
     }
 
-    const procAdapter = {
-        stdout: {
-            on: (event, cb) => {
-                if (event === "data") ptyProcess.onData(cb);
-            }
-        },
-        stderr: {
-            on: () => {}
-        },
-        on: (event, cb) => {
-            if (event === "close" || event === "exit") {
-                ptyProcess.onExit(({ exitCode }) => cb(exitCode));
-            }
-        }
-    };
-
     return {
-        proc: procAdapter,
-        ptyProcess,
         containerName,
         onData: (cb) => ptyProcess.onData(cb),
         onExit: (cb) => ptyProcess.onExit(cb),

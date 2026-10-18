@@ -35,7 +35,11 @@ function App() {
   const isConnectingRef = useRef(false);
   const isMountedRef = useRef(true);
   const appStateRef = useRef<AppState>(appState);
-  appStateRef.current = appState;
+  const connectWebSocketRef = useRef<() => void>(() => {});
+
+  useEffect(() => {
+    appStateRef.current = appState;
+  }, [appState]);
 
   const connectWebSocket = useCallback(() => {
     if (!isMountedRef.current) return;
@@ -65,7 +69,9 @@ function App() {
         console.log("WebSocket connection attempt timed out");
         try {
           socket.close();
-        } catch (_) {}
+        } catch {
+          // Ignore close error on hung socket
+        }
         isConnectingRef.current = false;
         setConnected(false);
       }
@@ -91,8 +97,6 @@ function App() {
           // Once output is emitted, ensure state is RUNNING
           setAppState("RUNNING");
           setStatusMessage("Running");
-          terminal.current?.write(message.data);
-        } else if (message.type === "stderr") {
           terminal.current?.write(message.data);
         } else if (message.type === "exit") {
           terminal.current?.writeln("");
@@ -152,13 +156,17 @@ function App() {
           reconnectTimerRef.current = window.setTimeout(() => {
             reconnectTimerRef.current = null;
             if (document.visibilityState === "visible") {
-              connectWebSocket();
+              connectWebSocketRef.current();
             }
           }, 2000);
         }
       }
     };
   }, []);
+
+  useEffect(() => {
+    connectWebSocketRef.current = connectWebSocket;
+  }, [connectWebSocket]);
 
   // Reconnect idle WebSocket when the browser tab is resumed
   useEffect(() => {

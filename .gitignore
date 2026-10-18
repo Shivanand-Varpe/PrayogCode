@@ -4,5 +4,7 @@ temp/
 *.exe
 *.o
 *.obj
+*.out
+test
 dist/
 build/

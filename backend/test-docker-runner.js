@@ -37,7 +37,7 @@ int main() {
     console.log("Running executable in Docker...");
     const session = runInDocker(tempDir);
 
-    session.proc.stdout.on("data", (data) => {
+    session.onData((data) => {
         const text = data.toString("utf8");
         console.log("CONTAINER STDOUT:", text);
         if (text.includes("Enter two numbers:")) {
@@ -46,12 +46,8 @@ int main() {
         }
     });
 
-    session.proc.stderr.on("data", (data) => {
-        console.log("CONTAINER STDERR:", data.toString("utf8"));
-    });
-
-    session.proc.on("close", (code) => {
-        console.log("CONTAINER CLOSED with code:", code);
+    session.onExit(({ exitCode }) => {
+        console.log("CONTAINER CLOSED with code:", exitCode);
         cleanupTempWorkspace(tempDir);
         console.log("TEST FINISHED SUCCESSFULLY!");
     });
