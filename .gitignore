@@ -8,3 +8,4 @@ temp/
 test
 dist/
 build/
+.agents/
