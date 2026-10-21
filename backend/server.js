@@ -1,6 +1,8 @@
 const express = require("express");
 const cors = require("cors");
 const http = require("http");
+const path = require("path");
+const fs = require("fs");
 const WebSocket = require("ws");
 const {
     checkDockerAvailable,
@@ -11,7 +13,7 @@ const {
 } = require("./dockerRunner");
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 // Global crash guards to ensure WebSocket server never dies unexpectedly
 process.on("uncaughtException", (err) => {
@@ -28,11 +30,27 @@ const MAX_INPUT_PAYLOAD = 64 * 1024;       // 64 KB
 
 app.use(cors());
 
-app.get("/", (req, res) => {
+app.get("/health", (req, res) => {
     res.json({
+        status: "ok",
         message: "PrayogCode C Compiler Backend is running (Docker Sandbox)!"
     });
 });
+
+const frontendDist = path.join(__dirname, "../frontend/dist");
+if (fs.existsSync(frontendDist)) {
+    app.use(express.static(frontendDist));
+    app.get("*", (req, res, next) => {
+        if (req.path === "/ws" || req.path === "/health") return next();
+        res.sendFile(path.join(frontendDist, "index.html"));
+    });
+} else {
+    app.get("/", (req, res) => {
+        res.json({
+            message: "PrayogCode C Compiler Backend is running (Docker Sandbox)!"
+        });
+    });
+}
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });

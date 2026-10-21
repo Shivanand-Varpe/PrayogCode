@@ -50,9 +50,13 @@ function checkDockerAvailable() {
  * @returns {string} Absolute path to temporary workspace
  */
 function createTempWorkspace() {
-    return fs.mkdtempSync(
+    const tempDir = fs.mkdtempSync(
         path.join(os.tmpdir(), "prayog-")
     );
+    try {
+        fs.chmodSync(tempDir, 0o777);
+    } catch (_) {}
+    return tempDir;
 }
 
 /**
@@ -107,6 +111,9 @@ function compileInDocker(code, tempDir) {
 
     try {
         fs.writeFileSync(sourceFile, code, "utf8");
+        try {
+            fs.chmodSync(sourceFile, 0o666);
+        } catch (_) {}
     } catch (error) {
         return {
             promise: Promise.reject({

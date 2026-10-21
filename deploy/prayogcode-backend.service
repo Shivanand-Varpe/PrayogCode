@@ -1,0 +1,20 @@
+[Unit]
+Description=PrayogCode Online C Compiler Backend (Docker Execution Engine)
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/var/www/prayogcode/backend
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+Environment=PORT=3000
+
+# Security and system limits
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
