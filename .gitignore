@@ -10,3 +10,5 @@ dist/
 build/
 .agents/
 skills-lock.json
+graphify-out/
+.vscode/
